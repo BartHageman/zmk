@@ -53,6 +53,20 @@ enum advertising_type {
     ZMK_ADV_CONN,
 } advertising_status;
 
+static bool adv_enabled = false;
+
+static struct k_work_delayable adv_timeout_work;
+
+static void adv_timeout_handler(struct k_work *work) {
+    LOG_INF("Advertising timeout — stopping");
+    adv_enabled = false;
+    int err = bt_le_adv_stop();
+    if (err) {
+        LOG_ERR("Failed to stop advertising: %d", err);
+    }
+    advertising_status = ZMK_ADV_NONE;
+}
+
 #define CURR_ADV(adv) (adv << 4)
 
 #define ZMK_ADV_CONN_NAME                                                                          \
@@ -168,16 +182,17 @@ int update_advertising(void) {
     enum advertising_type desired_adv = ZMK_ADV_NONE;
 
     if (zmk_ble_active_profile_is_open()) {
-        desired_adv = ZMK_ADV_CONN;
+        /* Open profiles only advertise when pairing mode is active. */
+        if (adv_enabled) {
+            desired_adv = ZMK_ADV_CONN;
+        }
     } else if (!zmk_ble_active_profile_is_connected()) {
-        desired_adv = ZMK_ADV_CONN;
-        // Need to fix directed advertising for privacy centrals. See
-        // https://github.com/zephyrproject-rtos/zephyr/pull/14984 char
-        // addr_str[BT_ADDR_LE_STR_LEN]; bt_addr_le_to_str(zmk_ble_active_profile_addr(), addr_str,
-        // sizeof(addr_str));
-
-        // LOG_DBG("Directed advertising to %s", addr_str);
-        // desired_adv = ZMK_ADV_DIR;
+        /* Bonded profiles use directed advertising (invisible to
+         * non-target devices), gated by adv_enabled so the timeout
+         * can silence them too. */
+        if (adv_enabled) {
+            desired_adv = ZMK_ADV_DIR;
+        }
     }
     LOG_DBG("advertising from %d to %d", advertising_status, desired_adv);
 
@@ -210,6 +225,31 @@ static void update_advertising_callback(struct k_work *work) { update_advertisin
 
 K_WORK_DEFINE(update_advertising_work, update_advertising_callback);
 
+int zmk_ble_adv_start(void) {
+    adv_enabled = true;
+
+#if CONFIG_ZMK_BLE_ADVERTISING_TIMEOUT > 0
+    k_work_reschedule(&adv_timeout_work,
+                      K_SECONDS(CONFIG_ZMK_BLE_ADVERTISING_TIMEOUT));
+#endif
+
+    return update_advertising();
+}
+
+int zmk_ble_adv_stop(void) {
+    adv_enabled = false;
+    k_work_cancel_delayable(&adv_timeout_work);
+    return update_advertising();
+}
+
+int zmk_ble_adv_toggle(void) {
+    return adv_enabled ? zmk_ble_adv_stop() : zmk_ble_adv_start();
+}
+
+bool zmk_ble_adv_is_enabled(void) {
+    return adv_enabled;
+}
+
 static void clear_profile_bond(uint8_t profile) {
     if (bt_addr_le_cmp(&profiles[profile].peer, BT_ADDR_LE_ANY)) {
         bt_unpair(BT_ID_DEFAULT, &profiles[profile].peer);
@@ -221,7 +261,7 @@ void zmk_ble_clear_bonds(void) {
     LOG_DBG("zmk_ble_clear_bonds()");
 
     clear_profile_bond(active_profile);
-    update_advertising();
+    zmk_ble_adv_start();
 };
 
 void zmk_ble_clear_all_bonds(void) {
@@ -232,9 +272,8 @@ void zmk_ble_clear_all_bonds(void) {
         clear_profile_bond(i);
     }
 
-    // Automatically switch to profile 0
+    // Automatically switch to profile 0 (triggers advertising via prof_select)
     zmk_ble_prof_select(0);
-    update_advertising();
 };
 
 int zmk_ble_active_profile_index(void) { return active_profile; }
@@ -277,7 +316,15 @@ int zmk_ble_prof_select(uint8_t index) {
     active_profile = index;
     ble_save_profile();
 
-    update_advertising();
+    /* Auto-start advertising when switching profiles:
+     * - Open profiles (except last): enter pairing mode with timeout
+     * - Bonded profiles: directed reconnection with timeout
+     * - Last profile: stay silent (reserved for USB) */
+    if (active_profile < ZMK_BLE_PROFILE_COUNT - 1) {
+        zmk_ble_adv_start();
+    } else {
+        zmk_ble_adv_stop();
+    }
 
     raise_profile_changed_event();
 
@@ -491,6 +538,7 @@ static void connected(struct bt_conn *conn, uint8_t err) {
 
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     advertising_status = ZMK_ADV_NONE;
+    k_work_cancel_delayable(&adv_timeout_work);
 
     if (err) {
         LOG_WRN("Failed to connect to %s (%u)", addr, err);
@@ -525,6 +573,13 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
 
     // We need to do this in a work callback, otherwise the advertising update will still see the
     // connection for a profile as active, and not start advertising yet.
+    // Restart the advertising timeout so reconnection attempts don't run forever.
+#if CONFIG_ZMK_BLE_ADVERTISING_TIMEOUT > 0
+    if (adv_enabled) {
+        k_work_reschedule(&adv_timeout_work,
+                          K_SECONDS(CONFIG_ZMK_BLE_ADVERTISING_TIMEOUT));
+    }
+#endif
     k_work_submit(&update_advertising_work);
 
     if (is_conn_active_profile(conn)) {
@@ -704,7 +759,14 @@ static int zmk_ble_complete_startup(void) {
     bt_conn_auth_cb_register(&zmk_ble_auth_cb_display);
     bt_conn_auth_info_cb_register(&zmk_ble_auth_info_cb_display);
 
-    zmk_ble_ready(0);
+    k_work_init_delayable(&adv_timeout_work, adv_timeout_handler);
+
+    /* Auto-advertise on boot unless this is the last profile (USB-only).
+     * Bonded profiles get directed advertising; open profiles get
+     * connectable advertising. Both are subject to the timeout. */
+    if (active_profile < ZMK_BLE_PROFILE_COUNT - 1) {
+        zmk_ble_adv_start();
+    }
 
     return 0;
 }

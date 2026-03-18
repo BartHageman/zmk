@@ -43,6 +43,21 @@ static const struct behavior_parameter_value_metadata no_arg_values[] = {
         .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
         .value = BT_CLR_CMD,
     },
+    {
+        .display_name = "Start Advertising",
+        .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+        .value = BT_ADV_ON_CMD,
+    },
+    {
+        .display_name = "Stop Advertising",
+        .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+        .value = BT_ADV_OFF_CMD,
+    },
+    {
+        .display_name = "Toggle Advertising",
+        .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+        .value = BT_ADV_TOG_CMD,
+    },
 };
 
 static const struct behavior_parameter_metadata_set no_args_set = {
@@ -105,6 +120,12 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
         return 0;
     case BT_DISC_CMD:
         return zmk_ble_prof_disconnect(binding->param2);
+    case BT_ADV_ON_CMD:
+        return zmk_ble_adv_start();
+    case BT_ADV_OFF_CMD:
+        return zmk_ble_adv_stop();
+    case BT_ADV_TOG_CMD:
+        return zmk_ble_adv_toggle();
     default:
         LOG_ERR("Unknown BT command: %d", binding->param1);
     }

@@ -242,6 +242,15 @@ config BT_PERIPHERAL_PREF_LATENCY
 config BT_PERIPHERAL_PREF_TIMEOUT
     default 400
 
+config ZMK_BLE_ADVERTISING_TIMEOUT
+    int "BLE advertising timeout in seconds (0 = no timeout)"
+    default 30
+    help
+      Time in seconds after which host-facing BLE advertising
+      automatically stops. Set to 0 to advertise indefinitely
+      (original ZMK behaviour). Only applies when advertising
+      is started via a keymap binding or on boot (if enabled).
+
 endif # ZMK_BLE
 
 endmenu # Output Types
